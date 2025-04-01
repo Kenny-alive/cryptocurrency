@@ -1,117 +1,188 @@
 process.env.NTBA_FIX_350 = "true";
 import puppeteer from 'puppeteer';
 import axios from 'axios';
-// import fs from 'fs';
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
+import { google } from 'googleapis';
+import { GoogleAuth } from 'google-auth-library';
+
 dotenv.config();
 
-const cmcApiKey = process.env.CMC_API_KEY;
-const googleSheetsUrl = process.env.GOOGLE_SHEETS_URL;
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.CHAT_ID;
-
 const bot = new TelegramBot(botToken, { polling: true });
+
+const cmcApiKey = process.env.CMC_API_KEY;
+const spreadsheetId = process.env.SPREADSHEET_ID;
+
+async function getGoogleSheetsClient() {
+  const auth = new GoogleAuth({
+    keyFile: 'service-account.json',
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  });
+
+  const client = await auth.getClient();
+  return google.sheets({ version: 'v4', auth: client });
+}
 
 async function fetchData() {
   try {
-    const sheetResponse = await axios.get(googleSheetsUrl);
-    const sheetData = sheetResponse.data;
+    const sheets = {
+      "Sheet1": "1_iHq0iyVFYOx3Xnch7zJCXwkU-Jy4s9qEJlG_HcVX_E",
+      "Sheet2": "1KRRgOSg2c3n5rznwnIgiz54f8qqYdRngwiuN95W33LQ"
+    };
 
-    if (!sheetData.values) {
-      throw new Error('No data from Google Sheets.');
-    }
-
-    const portfolio = sheetData.values.slice(1);
+    let allTables = "";
 
     const cmcResponse = await axios.get('https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest', {
-      headers: {
-        'X-CMC_PRO_API_KEY': cmcApiKey,
-      },
+      headers: { 'X-CMC_PRO_API_KEY': cmcApiKey },
     });
-    const cryptocurrencies = cmcResponse.data.data;
 
-    if (!cryptocurrencies) {
-      throw new Error('No data from CoinMarketCap.');
+    const cryptocurrencies = cmcResponse.data.data;
+    if (!cryptocurrencies) throw new Error('No data from CoinMarketCap.');
+
+    const btcData = cryptocurrencies.find(c => c.symbol.toUpperCase() === "BTC");
+    const btcUsdPrice = btcData ? btcData.quote.USD.price : null;
+
+    const loadedSymbols = cryptocurrencies.map(c => c.symbol.toUpperCase());
+    let missingCoins = [];
+
+    for (const [sheetName, sheetId] of Object.entries(sheets)) {
+      const googleSheets = await getGoogleSheetsClient();
+      const response = await googleSheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: "A1:Z100",
+      });
+
+      const sheetData = response.data.values || [];
+      sheetData.slice(1).forEach(row => {
+        const cryptoName = sheetName === "Sheet1" ? row[3] ?? "" : row[2] ?? "";
+        if (cryptoName.trim() && !loadedSymbols.includes(cryptoName.toUpperCase())) {
+          missingCoins.push(cryptoName);
+        }
+      });
     }
 
-    let tableHTML =
-      `<html>
-        <head>
-          <style>
-            .table-container {
-              max-width: 100%;
-              margin: 30px auto;
-              overflow-x: auto;
-              border-radius: 10px;
-              box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-              background: linear-gradient(135deg, #6e7dff, #00b0ff);
-              padding: 20px;
-              border: 1px solid #ddd;
-              transition: all 0.3s ease-in-out;
-            }
-            .crypto-table {
-              width: 100%;
-              border-collapse: collapse;
-              border-radius: 10px;
-              font-family: 'Arial', sans-serif;
-              margin: 0 auto;
-            }
-            .crypto-table th, .crypto-table td {
-              padding: 15px 20px;
-              text-align: left;
-              border: 1px solid #ddd;
-              font-size: 16px;
-            }
-            .crypto-table th {
-              background-color: #4e73df;
-              color: #fff;
-            }
-            .crypto-table tr:nth-child(even) {
-              background-color: #f9f9f9;
-            }
-            .crypto-table tr:hover {
-              background-color: #f1f1f1;
-            }
-          </style>
-        </head>
-        <body>
-          <div class="table-container">
-            <table class="crypto-table">
-              <thead>
-                <tr><th>#</th><th>Cryptocurrency</th><th>Quantity</th><th>Price (USD)</th><th>Total Value (USD)</th></tr>
-              </thead>
-              <tbody>`;
+    missingCoins = [...new Set(missingCoins)];
 
-    portfolio.forEach((row, index) => {
-      const cryptoName = row[1];
-      const amount = parseFloat(row[2]);
+    for (const missingCoin of missingCoins) {
+      if (!/^[A-Z0-9]+$/.test(missingCoin)) continue;
 
-      const crypto = cryptocurrencies.find(c => c.name.toLowerCase() === cryptoName.toLowerCase());
-      if (crypto) {
-        const price = crypto.quote.USD.price;
-        const totalValue = amount * price;
+      const responseBySymbol = await axios.get(
+        'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest',
+        {
+          headers: { 'X-CMC_PRO_API_KEY': cmcApiKey },
+          params: { symbol: missingCoin.toUpperCase() },
+        }
+      );
 
-        tableHTML +=
-          `<tr>
-            <td>${index + 1}</td>
-            <td>${cryptoName}</td>
-            <td>${amount}</td>
-            <td>$${price.toFixed(2)}</td>
-            <td>$${totalValue.toFixed(2)}</td>
-          </tr>`;
+      if (responseBySymbol.data.data[missingCoin.toUpperCase()]) {
+        const coinData = responseBySymbol.data.data[missingCoin.toUpperCase()];
+        cryptocurrencies.push(coinData);
       }
-    });
+    }
 
-    tableHTML += '</tbody></table></div></body></html>';
+    for (const [sheetName, sheetId] of Object.entries(sheets)) {
+      const googleSheets = await getGoogleSheetsClient();
+      const response = await googleSheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: "A1:Z100",
+      });
 
-    const screenshotPath = await generateImageFromHtml(tableHTML);
-    console.log(`Screenshot saved to ${screenshotPath}`);
+      const sheetData = response.data.values || [];
+      let tableHTML = `
+                <div class="table-container">
+                    <h2>${sheetName}</h2>
+                    <table class="crypto-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Наименование</th>
+                                <th>Монета</th>
+                                <th>Цена, $BTC</th>
+                                <th>Цена, $</th>
+                                <th>Кол-во монет</th>
+                                <th>НАЧАЛО $</th>
+                                <th>СЕЙЧАС $</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
 
+      sheetData.slice(1).forEach((row, index) => {
+        let cmcUrl, fullName, cryptoName, amountStr, startPriceStr, currentPriceStr;
+
+        if (sheetName === "Sheet1") {
+          cmcUrl = row[1] ?? " ";
+          fullName = row[2] ?? " ";
+          cryptoName = row[3] ?? " ";
+          amountStr = row[6] ?? " ";
+          startPriceStr = row[5] ?? " ";
+          currentPriceStr = row[7] ?? " ";
+        } else {
+          cmcUrl = row[0] ?? " ";
+          fullName = row[1] ?? " ";
+          cryptoName = row[2] ?? " ";
+          amountStr = row[5] ?? " ";
+          startPriceStr = row[7] ?? " ";
+          currentPriceStr = row[8] ?? " ";
+        }
+
+        if (!cryptoName.trim() || !amountStr.trim()) return;
+
+        let priceUSD = "N/A";
+        let priceBTC = "N/A";
+        const crypto = cryptocurrencies.find(c => c.symbol.toUpperCase() === cryptoName.toUpperCase());
+
+        if (crypto) {
+          priceUSD = `$${crypto.quote.USD.price.toFixed(2)}`;
+          if (crypto.quote.BTC) {
+            priceBTC = crypto.quote.BTC.price.toFixed(8);
+          } else if (btcUsdPrice) {
+            priceBTC = (crypto.quote.USD.price / btcUsdPrice).toFixed(8);
+          }
+
+          if (startPriceStr.trim() !== "" && !isNaN(parseFloat(amountStr))) {
+            const priceNow = crypto.quote.USD.price;
+            const amount = parseFloat(amountStr.replace(/,/g, ''));
+            currentPriceStr = `$${(priceNow * amount).toFixed(2)}`;
+          }
+        }
+
+        tableHTML += `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${fullName}</td>
+                        <td>${cmcUrl !== " " ? `<a href="${cmcUrl}" target="_blank">${cryptoName}</a>` : " "}</td>
+                        <td>${priceBTC}</td>
+                        <td>${priceUSD}</td>
+                        <td>${amountStr}</td>
+                        <td>${startPriceStr}</td>
+                        <td>${currentPriceStr}</td>
+                    </tr>`;
+      });
+
+      tableHTML += `</tbody></table></div>`;
+      allTables += tableHTML;
+    }
+
+    let finalHTML = `
+            <html>
+                <head>
+                    <style>
+                        .crypto-table { width: 100%; border-collapse: collapse; }
+                        .crypto-table th, .crypto-table td { padding: 8px; border: 1px solid #ddd; }
+                        .crypto-table th { background-color: #4e73df; color: #fff; }
+                        .crypto-table tr:nth-child(even) { background-color: #f9f9f9; }
+                        .crypto-table tr:hover { background-color: #f1f1f1; }
+                    </style>
+                </head>
+                <body>${allTables}</body>
+            </html>`;
+
+    const screenshotPath = await generateImageFromHtml(finalHTML);
     return screenshotPath;
-
   } catch (error) {
-    console.error('Error fetching data:', error);
+    console.error('❌ Ошибка получения данных:', error);
     throw error;
   }
 }
@@ -119,12 +190,9 @@ async function fetchData() {
 async function generateImageFromHtml(html) {
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
-
   await page.setContent(html);
-
   const screenshotPath = 'crypto-table.png';
   await page.screenshot({ path: screenshotPath, fullPage: true });
-
   await browser.close();
   return screenshotPath;
 }
@@ -132,14 +200,10 @@ async function generateImageFromHtml(html) {
 bot.onText(/\/getData/, async (msg) => {
   try {
     const chatId = msg.chat.id;
-
     const imagePath = await fetchData();
-
     bot.sendPhoto(chatId, imagePath, { contentType: 'image/png' });
   } catch (error) {
-    console.error('Error handling /getData:', error);
-    bot.sendMessage(chatId, 'An error occurred while retrieving the data. Please try again later.');
+    console.error('Ошибка обработки /getData:', error);
+    bot.sendMessage(chatId, 'Произошла ошибка при получении данных. Попробуйте позже.');
   }
 });
-
-

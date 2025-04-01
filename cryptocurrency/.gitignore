@@ -13,6 +13,7 @@ dist-ssr
 *.local
 .env
 tgbotapi.js
+service-account.json
 
 
 # Editor directories and files
