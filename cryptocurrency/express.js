@@ -1,4 +1,5 @@
-process.env.NTBA_FIX_350 = "true";
+import express from 'express';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import puppeteer from 'puppeteer';
 import axios from 'axios';
 import TelegramBot from 'node-telegram-bot-api';
@@ -8,12 +9,34 @@ import { GoogleAuth } from 'google-auth-library';
 
 dotenv.config();
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use('/api', (req, res, next) => {
+  console.log('🔍 Incoming request to API:', req.originalUrl);
+  next();
+});
+// Настройка прокси middleware
+app.use('/api', createProxyMiddleware({
+  target: 'https://pro-api.coinmarketcap.com',
+  changeOrigin: true,
+  secure: false,
+  pathRewrite: { '^/api': '' },
+  onProxyReq: (proxyReq, req, res) => {
+    // Добавляем API-ключ CMC к каждому запросу
+    proxyReq.setHeader('X-CMC_PRO_API_KEY', process.env.CMC_API_KEY);
+  }
+}));
+
+// Telegram bot setup
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.CHAT_ID;
 const bot = new TelegramBot(botToken, { polling: true });
 
-const cmcApiKey = process.env.CMC_API_KEY;
-const spreadsheetId = process.env.SPREADSHEET_ID;
+const sheets = {
+  "Sheet1": process.env.SHEET1_ID,
+  "Sheet2": process.env.SHEET2_ID
+};
 
 async function getGoogleSheetsClient() {
   const auth = new GoogleAuth({
@@ -27,25 +50,18 @@ async function getGoogleSheetsClient() {
 
 async function fetchData() {
   try {
-    const sheets = {
-      "Sheet1": "1_iHq0iyVFYOx3Xnch7zJCXwkU-Jy4s9qEJlG_HcVX_E",
-      "Sheet2": "1KRRgOSg2c3n5rznwnIgiz54f8qqYdRngwiuN95W33LQ"
-    };
-
     let allTables = "";
 
     const cmcResponse = await axios.get('https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest', {
-      headers: { 'X-CMC_PRO_API_KEY': cmcApiKey },
+      headers: { 'X-CMC_PRO_API_KEY': process.env.CMC_API_KEY },
     });
 
-    const cryptocurrencies = cmcResponse.data.data;
-    if (!cryptocurrencies) throw new Error('No data from CoinMarketCap.');
-
+    const cryptocurrencies = cmcResponse.data.data || [];
     const btcData = cryptocurrencies.find(c => c.symbol.toUpperCase() === "BTC");
     const btcUsdPrice = btcData ? btcData.quote.USD.price : null;
 
-    const loadedSymbols = cryptocurrencies.map(c => c.symbol.toUpperCase());
     let missingCoins = [];
+    let loadedSymbols = cryptocurrencies.map(c => c.symbol.toUpperCase());
 
     for (const [sheetName, sheetId] of Object.entries(sheets)) {
       const googleSheets = await getGoogleSheetsClient();
@@ -71,7 +87,7 @@ async function fetchData() {
       const responseBySymbol = await axios.get(
         'https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest',
         {
-          headers: { 'X-CMC_PRO_API_KEY': cmcApiKey },
+          headers: { 'X-CMC_PRO_API_KEY': process.env.CMC_API_KEY },
           params: { symbol: missingCoin.toUpperCase() },
         }
       );
@@ -90,23 +106,22 @@ async function fetchData() {
       });
 
       const sheetData = response.data.values || [];
-      let tableHTML = `
-                <div class="table-container">
-                    <h2>${sheetName}</h2>
-                    <table class="crypto-table">
-                        <thead>
-                            <tr>
-                                <th>#</th>
-                                <th>Наименование</th>
-                                <th>Монета</th>
-                                <th>Цена, $BTC</th>
-                                <th>Цена, $</th>
-                                <th>Кол-во монет</th>
-                                <th>НАЧАЛО $</th>
-                                <th>СЕЙЧАС $</th>
-                            </tr>
-                        </thead>
-                        <tbody>`;
+      let tableHTML = `<div class="table-container">
+            <h2>${sheetName}</h2>
+            <table class="crypto-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Наименование</th>
+                        <th>Монета</th>
+                        <th>Цена, $BTC</th>
+                        <th>Цена, $</th>
+                        <th>Кол-во монет</th>
+                        <th>НАЧАЛО $</th>
+                        <th>СЕЙЧАС $</th>
+                    </tr>
+                </thead>
+                <tbody>`;
 
       sheetData.slice(1).forEach((row, index) => {
         let cmcUrl, fullName, cryptoName, amountStr, startPriceStr, currentPriceStr;
@@ -147,7 +162,6 @@ async function fetchData() {
             const amount = parseFloat(amountStr.replace(/,/g, ''));
             currentPriceStr = `$${(priceNow * amount).toFixed(2)}`;
 
-            // Определяем цвет для наименования
             const startPrice = parseFloat(startPriceStr.replace(/[^0-9.-]+/g, ''));
             const currentPrice = parseFloat(currentPriceStr.replace(/[^0-9.-]+/g, ''));
             if (!isNaN(startPrice) && !isNaN(currentPrice)) {
@@ -157,60 +171,49 @@ async function fetchData() {
         }
 
         tableHTML += `
-                    <tr>
-                        <td>${index + 1}</td>
-                        <td style="color: ${nameColor}">${fullName}</td>
-                        <td>${cryptoName}</td>
-                        <td>${priceBTC}</td>
-                        <td>${priceUSD}</td>
-                        <td>${parseFloat(amountStr).toString()}</td>
-                        <td>${startPriceStr}</td>
-                        <td>${currentPriceStr}</td>
-                    </tr>`;
+          <tr>
+              <td>${index + 1}</td>
+              <td style="color: ${nameColor}">${fullName}</td>
+              <td>${cryptoName}</td>
+              <td>${priceBTC}</td>
+              <td>${priceUSD}</td>
+              <td>${parseFloat(amountStr).toString()}</td>
+              <td>${startPriceStr}</td>
+              <td>${currentPriceStr}</td>
+          </tr>`;
       });
 
       tableHTML += `</tbody></table></div>`;
       allTables += tableHTML;
     }
 
-    let finalHTML = `
-            <html>
-                <head>
-                    <style>
-                        .crypto-table { width: 100%; border-collapse: collapse; }
-                        .crypto-table th, .crypto-table td { padding: 8px; border: 1px solid #ddd; }
-                        .crypto-table th { background-color: #4e73df; color: #fff; }
-                        .crypto-table tr:nth-child(even) { background-color: #f9f9f9; }
-                        .crypto-table tr:hover { background-color: #f1f1f1; }
-                    </style>
-                </head>
-                <body>${allTables}</body>
-            </html>`;
-
-    const screenshotPath = await generateImageFromHtml(finalHTML);
-    return screenshotPath;
+    return `<html>
+          <head>
+              <style>
+                  .crypto-table { width: 100%; border-collapse: collapse; }
+                  .crypto-table th, .crypto-table td { padding: 8px; border: 1px solid #ddd; }
+                  .crypto-table th { background-color: #4e73df; color: #fff; }
+                  .crypto-table tr:nth-child(even) { background-color: #f9f9f9; }
+                  .crypto-table tr:hover { background-color: #f1f1f1; }
+              </style>
+          </head>
+          <body>${allTables}</body>
+      </html>`;
   } catch (error) {
     console.error('❌ Ошибка получения данных:', error);
-    throw error;
+    return '<h1>Ошибка загрузки данных</h1>';
   }
 }
 
-async function generateImageFromHtml(html) {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
-  await page.setContent(html);
-  const screenshotPath = 'crypto-table.png';
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  await browser.close();
-  return screenshotPath;
-}
-
-bot.onText(/\/getData/, async (msg) => {
-  try {
-    const imagePath = await fetchData();
-    bot.sendPhoto(msg.chat.id, imagePath, { contentType: 'image/png' });
-  } catch (error) {
-    bot.sendMessage(msg.chat.id, 'Произошла ошибка при получении данных.');
-  }
+app.get('/', async (req, res) => {
+  const html = await fetchData();
+  res.send(html);
 });
+
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на http://localhost:${PORT}`);
+});
+
+
+
 

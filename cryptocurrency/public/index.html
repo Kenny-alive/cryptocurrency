@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Mini App</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      text-align: center;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 20px;
+    }
+
+    th,
+    td {
+      border: 1px solid #ddd;
+      padding: 8px;
+    }
+
+    th {
+      background-color: #4CAF50;
+      color: white;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Курсы криптовалют</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Монета</th>
+        <th>Цена (USD)</th>
+      </tr>
+    </thead>
+    <tbody id="crypto-table">
+      <tr>
+        <td colspan="3">Загрузка...</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <script>
+    async function loadCryptoData() {
+      try {
+        const response = await fetch('/api/crypto');
+        const data = await response.json();
+        const table = document.getElementById('crypto-table');
+        table.innerHTML = '';
+
+        data.data.slice(0, 10).forEach((crypto, index) => {
+          const row = `<tr>
+                        <td>${index + 1}</td>
+                        <td>${crypto.name} (${crypto.symbol})</td>
+                        <td>$${crypto.quote.USD.price.toFixed(2)}</td>
+                    </tr>`;
+          table.innerHTML += row;
+        });
+      } catch (error) {
+        document.getElementById('crypto-table').innerHTML = '<tr><td colspan="3">Ошибка загрузки</td></tr>';
+      }
+    }
+
+    window.onload = loadCryptoData;
+  </script>
+</body>
+
+</html>
