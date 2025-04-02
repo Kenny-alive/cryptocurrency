@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
+import path from 'path'
 
 export default defineConfig({
+  root: '.', // Указание корневой директории
   server: {
     proxy: {
       '/api': {
@@ -12,6 +14,9 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist', // Папка для билда
+    outDir: 'dist',
+    rollupOptions: {
+      input: path.resolve(__dirname, 'index.html'),
+    },
   },
 })
